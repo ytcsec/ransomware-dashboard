@@ -16,21 +16,20 @@ import (
 )
 
 type Server struct {
-	db  *store.DB
-	cfg config.Config
-	rf  refreshState
-}
-
-type refreshState struct {
+	db      *store.DB
+	cfg     config.Config
 	mu      sync.Mutex
-	running bool
-	lastRun string
-	lastErr string
+	calisir bool
+	sonrun  string
+	sonhata string
 	stats   *ingest.Stats
 }
 
 func New(db *store.DB, cfg config.Config) *Server {
-	return &Server{db: db, cfg: cfg}
+	s := &Server{}
+	s.db = db
+	s.cfg = cfg
+	return s
 }
 
 func (s *Server) Routes() http.Handler {
@@ -47,241 +46,275 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/victims", s.victims)
 	mux.HandleFunc("GET /api/ioc", s.ioc)
 	mux.HandleFunc("GET /api/iocs", s.iocs)
-	mux.HandleFunc("GET /api/ioc-groups", s.iocGroups)
+	mux.HandleFunc("GET /api/ioc-groups", s.iocgroups)
 	mux.HandleFunc("POST /api/refresh", s.refresh)
-	mux.HandleFunc("GET /api/refresh/status", s.refreshStatus)
+	mux.HandleFunc("GET /api/refresh/status", s.refreshstatus)
 	return cors(mux)
 }
 
-func (s *Server) floorFor(r *http.Request) string {
-	var days int
-	switch r.URL.Query().Get("window") {
-	case "30d":
-		days = 30
-	case "180d":
-		days = 180
-	case "365d":
-		days = 365
-	default:
+func sendjson(w http.ResponseWriter, kod int, veri any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(kod)
+	json.NewEncoder(w).Encode(veri)
+}
+
+func sendhata(w http.ResponseWriter, err error) {
+	sendjson(w, 500, map[string]string{"error": err.Error()})
+}
+
+func getint(r *http.Request, isim string, def int) int {
+	v := r.URL.Query().Get(isim)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func (s *Server) taban(r *http.Request) string {
+	gun := 0
+	w := r.URL.Query().Get("window")
+	if w == "30d" {
+		gun = 30
+	} else if w == "180d" {
+		gun = 180
+	} else if w == "365d" {
+		gun = 365
+	} else {
 		return ""
 	}
-	maxd := s.db.MaxDate()
-	if maxd == "" {
+	sontarih := s.db.MaxDate()
+	if sontarih == "" {
 		return ""
 	}
-	t, ok := util.ParseFlexible(maxd)
+	t, ok := util.ParseDate(sontarih)
 	if !ok {
 		return ""
 	}
-	return t.AddDate(0, 0, -days).Format("2006-01-02")
+	return t.AddDate(0, 0, -gun).Format("2006-01-02")
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	meta, _ := s.db.Meta()
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "meta": meta})
+	sendjson(w, 200, map[string]any{"status": "ok", "meta": meta})
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.Summary(s.floorFor(r))
-	if err == nil {
-		res.Window = r.URL.Query().Get("window")
+	sonuc, err := s.db.GetSummary(s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
 	}
-	respond(w, res, err)
+	sonuc.Window = r.URL.Query().Get("window")
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.GroupDist(qInt(r, "limit", 12), s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Groups(getint(r, "limit", 12), s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) countries(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.CountryDist(qInt(r, "limit", 40), s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Countries(getint(r, "limit", 40), s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) sectors(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.SectorDist(qInt(r, "limit", 20), s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Sectors(getint(r, "limit", 20), s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) vectors(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.VectorDist(s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Vectors(s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) techniques(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.TechniqueDist(qInt(r, "limit", 12), s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Techniques(getint(r, "limit", 12), s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {
-	daily := r.URL.Query().Get("window") == "30d"
-	res, err := s.db.TimeSeries(s.floorFor(r), daily)
-	respond(w, res, err)
+	gunluk := r.URL.Query().Get("window") == "30d"
+	sonuc, err := s.db.TimeSeries(s.taban(r), gunluk)
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) severity(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.SeverityDist(s.floorFor(r))
-	respond(w, res, err)
+	sonuc, err := s.db.Severities(s.taban(r))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) victims(w http.ResponseWriter, r *http.Request) {
-	f := store.VictimFilter{
-		Group:       r.URL.Query().Get("group"),
-		Country:     r.URL.Query().Get("country"),
-		Sector:      r.URL.Query().Get("sector"),
-		SeverityMin: qInt(r, "severity_min", 0),
-		Query:       r.URL.Query().Get("q"),
-		Limit:       qInt(r, "limit", 50),
-		Offset:      qInt(r, "offset", 0),
-	}
-	rows, total, err := s.db.Victims(f)
+	var f store.VictimFilter
+	f.Group = r.URL.Query().Get("group")
+	f.Country = r.URL.Query().Get("country")
+	f.Sector = r.URL.Query().Get("sector")
+	f.SeverityMin = getint(r, "severity_min", 0)
+	f.Query = r.URL.Query().Get("q")
+	f.Limit = getint(r, "limit", 50)
+	f.Offset = getint(r, "offset", 0)
+	liste, toplam, err := s.db.Victims(f)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		sendhata(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total": total, "limit": f.Limit, "offset": f.Offset, "items": rows})
+	sendjson(w, 200, map[string]any{"total": toplam, "limit": f.Limit, "offset": f.Offset, "items": liste})
 }
 
 func (s *Server) ioc(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.IOCSearch(r.URL.Query().Get("q"))
-	respond(w, res, err)
+	sonuc, err := s.db.IOCSearch(r.URL.Query().Get("q"))
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) iocs(w http.ResponseWriter, r *http.Request) {
-	f := store.IOCFilter{
-		Type:   r.URL.Query().Get("type"),
-		Group:  r.URL.Query().Get("group"),
-		Query:  r.URL.Query().Get("q"),
-		Limit:  qInt(r, "limit", 50),
-		Offset: qInt(r, "offset", 0),
-	}
-	items, total, err := s.db.IOCList(f)
+	var f store.IOCFilter
+	f.Type = r.URL.Query().Get("type")
+	f.Group = r.URL.Query().Get("group")
+	f.Query = r.URL.Query().Get("q")
+	f.Limit = getint(r, "limit", 50)
+	f.Offset = getint(r, "offset", 0)
+	liste, toplam, err := s.db.IOCList(f)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		sendhata(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total": total, "limit": f.Limit, "offset": f.Offset, "items": items})
+	sendjson(w, 200, map[string]any{"total": toplam, "limit": f.Limit, "offset": f.Offset, "items": liste})
 }
 
-func (s *Server) iocGroups(w http.ResponseWriter, r *http.Request) {
-	res, err := s.db.IOCGroups()
-	respond(w, res, err)
+func (s *Server) iocgroups(w http.ResponseWriter, r *http.Request) {
+	sonuc, err := s.db.IOCGroups()
+	if err != nil {
+		sendhata(w, err)
+		return
+	}
+	sendjson(w, 200, sonuc)
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
-	started := s.TriggerRefresh()
-	st := s.statusMap()
-	st["started"] = started
-	writeJSON(w, http.StatusOK, st)
+	basladi := s.StartRefresh()
+	durum := s.durum()
+	durum["started"] = basladi
+	sendjson(w, 200, durum)
 }
 
-func (s *Server) refreshStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.statusMap())
+func (s *Server) refreshstatus(w http.ResponseWriter, r *http.Request) {
+	sendjson(w, 200, s.durum())
 }
 
-func (s *Server) statusMap() map[string]any {
-	s.rf.mu.Lock()
-	defer s.rf.mu.Unlock()
-	m := map[string]any{
-		"running":  s.rf.running,
-		"last_run": s.rf.lastRun,
-		"error":    s.rf.lastErr,
-	}
-	if s.rf.stats != nil {
-		m["victims"] = s.rf.stats.Victims
-		m["iocs"] = s.rf.stats.IOCs
-		m["ioc_mode"] = s.rf.stats.IOCMode
+func (s *Server) durum() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := map[string]any{}
+	m["running"] = s.calisir
+	m["last_run"] = s.sonrun
+	m["error"] = s.sonhata
+	if s.stats != nil {
+		m["victims"] = s.stats.Victims
+		m["iocs"] = s.stats.IOCs
+		m["ioc_mode"] = s.stats.IOCMode
 	}
 	return m
 }
 
-func (s *Server) TriggerRefresh() bool {
-	s.rf.mu.Lock()
-	if s.rf.running {
-		s.rf.mu.Unlock()
+func (s *Server) StartRefresh() bool {
+	s.mu.Lock()
+	if s.calisir {
+		s.mu.Unlock()
 		return false
 	}
-	s.rf.running = true
-	s.rf.mu.Unlock()
+	s.calisir = true
+	s.mu.Unlock()
 
 	go func() {
 		cfg := s.cfg
 		cfg.Refresh = true
 		log.Printf("veri tazeleme basladi")
 		stats, err := ingest.Run(context.Background(), cfg)
-		s.rf.mu.Lock()
-		s.rf.running = false
-		s.rf.lastRun = time.Now().UTC().Format(time.RFC3339)
+		s.mu.Lock()
+		s.calisir = false
+		s.sonrun = time.Now().UTC().Format(time.RFC3339)
 		if err != nil {
-			s.rf.lastErr = err.Error()
+			s.sonhata = err.Error()
 			log.Printf("veri tazeleme hatasi: %v", err)
 		} else {
-			s.rf.lastErr = ""
-			st := stats
-			s.rf.stats = &st
+			s.sonhata = ""
+			yeni := stats
+			s.stats = &yeni
 			log.Printf("veri tazeleme bitti: %d kurban", stats.Victims)
 		}
-		s.rf.mu.Unlock()
+		s.mu.Unlock()
 	}()
 	return true
 }
 
 func (s *Server) StartScheduler() {
-	if s.cfg.RefreshIntervalHrs <= 0 {
+	if s.cfg.RefreshHours <= 0 {
 		return
 	}
-	d := time.Duration(s.cfg.RefreshIntervalHrs) * time.Hour
-	log.Printf("otomatik tazeleme acik: her %d saatte bir", s.cfg.RefreshIntervalHrs)
+	log.Printf("otomatik tazeleme acik: her %d saatte bir", s.cfg.RefreshHours)
 	go func() {
-		t := time.NewTicker(d)
+		t := time.NewTicker(time.Duration(s.cfg.RefreshHours) * time.Hour)
 		defer t.Stop()
 		for range t.C {
-			s.TriggerRefresh()
+			s.StartRefresh()
 		}
 	}()
 }
 
 func (s *Server) SeedIfEmpty() {
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM victims`).Scan(&n); err == nil && n == 0 {
+	var adet int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM victims").Scan(&adet)
+	if err == nil && adet == 0 {
 		log.Printf("veritabani bos, ilk veri cekimi tetikleniyor")
-		s.TriggerRefresh()
+		s.StartRefresh()
 	}
 }
 
-func respond(w http.ResponseWriter, v any, err error) {
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, v)
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func qInt(r *http.Request, key string, def int) int {
-	if v := r.URL.Query().Get(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func cors(next http.Handler) http.Handler {
+func cors(sonraki http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(204)
 			return
 		}
-		next.ServeHTTP(w, r)
+		sonraki.ServeHTTP(w, r)
 	})
 }

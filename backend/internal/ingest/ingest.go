@@ -182,12 +182,13 @@ func Run(ctx context.Context, cfg config.Config) (Stats, error) {
 		}
 
 		t, _ := util.ParseDate(v.Date)
-		v.Severity = enrich.Severity(
-			enrich.SectorScore(v.Sector),
-			enrich.GroupScore(sayilar[v.Group], enbuyuk),
-			enrich.ImpactScore(p),
-			enrich.Freshness(t, sontarih),
-			enrich.IocScore(len(grupiocs[v.Group]) > 0))
+		v.Severity = enrich.ComputeSeverity(enrich.SeverityInput{
+			SectorScore:    enrich.SectorScore(v.Sector),
+			GroupScore:     enrich.GroupScore(sayilar[v.Group], enbuyuk),
+			ImpactScore:    enrich.ImpactScore(p),
+			FreshnessScore: enrich.FreshnessScore(t, sontarih),
+			IOCScore:       enrich.IOCScore(len(grupiocs[v.Group]) > 0),
+		})
 	}
 
 	sonay := aylar[len(aylar)-1]
